@@ -5,6 +5,7 @@ Chạy bằng: streamlit run mep_translator.py
 """
 
 import io
+import os
 import json
 import base64
 import copy
@@ -37,6 +38,45 @@ GLOSSARY_HINT = (
 )
 
 st.set_page_config(page_title="MEP Translator", page_icon="🛠️", layout="wide")
+
+
+# ----------------------------------------------------------------------------
+# Đọc cấu hình bí mật (API key, mật khẩu truy cập) — server-side, không lộ
+# cho người dùng. Ưu tiên st.secrets (dùng khi deploy Streamlit Cloud), sau
+# đó tới biến môi trường (dùng khi chạy local/LAN).
+# ----------------------------------------------------------------------------
+
+def get_secret(key: str, default=None):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+ADMIN_API_KEY = get_secret("ANTHROPIC_API_KEY")
+APP_PASSWORD = get_secret("APP_PASSWORD")  # để trống nếu không cần cổng mật khẩu
+
+
+def check_password_gate():
+    """Nếu APP_PASSWORD được cấu hình, yêu cầu nhập đúng mật khẩu mới cho vào app.
+    Mục đích: tránh người ngoài dùng ké API key của bạn nếu app được chia sẻ
+    công khai (VD: deploy Streamlit Cloud)."""
+    if not APP_PASSWORD:
+        return True
+    if st.session_state.get("authed"):
+        return True
+    st.title("🛠️ MEP TRANSLATOR")
+    st.caption("Nhập mật khẩu truy cập do quản trị viên cung cấp.")
+    pw = st.text_input("Mật khẩu", type="password")
+    if st.button("Vào ứng dụng"):
+        if pw == APP_PASSWORD:
+            st.session_state.authed = True
+            st.rerun()
+        else:
+            st.error("Sai mật khẩu.")
+    return False
 
 
 # ----------------------------------------------------------------------------
@@ -214,12 +254,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if not check_password_gate():
+    st.stop()
+
 st.title("🛠️ MEP TRANSLATOR")
-st.caption("Dịch tài liệu kỹ thuật MEP (Cơ – Điện – Nước) từ PDF, Word, Excel, Ảnh — chạy hoàn toàn trên máy bạn.")
+st.caption("Dịch tài liệu kỹ thuật MEP (Cơ – Điện – Nước) từ PDF, Word, Excel, Ảnh.")
 
 with st.sidebar:
     st.header("Cấu hình")
-    api_key = st.text_input("Anthropic API key", type="password", help="Dạng sk-ant-... — lấy tại console.anthropic.com")
+    if ADMIN_API_KEY:
+        api_key = ADMIN_API_KEY
+        st.success("🔑 API key đã được quản trị viên cấu hình sẵn.")
+    else:
+        api_key = st.text_input("Anthropic API key", type="password", help="Dạng sk-ant-... — lấy tại console.anthropic.com")
     st.markdown("---")
     src = st.selectbox("Ngôn ngữ nguồn", ["auto", "en", "vi", "zh"],
                         format_func=lambda k: "Tự động nhận diện" if k == "auto" else LANG_NAMES_VI[k])

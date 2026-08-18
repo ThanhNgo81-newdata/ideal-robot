@@ -57,12 +57,69 @@ thanh bên trái, chọn ngôn ngữ nguồn/đích, tải tệp lên và bấm 
 - **PDF/Word/Ảnh:** trích xuất văn bản, dịch theo đoạn, xem song song bản
   gốc/bản dịch, tải về .txt.
 
-## 6. Lưu ý
+## 6. Chia sẻ cho đồng nghiệp dùng — API key vẫn nằm ở phía bạn
+
+Mặc định app bắt nhập API key thủ công (dành cho bạn tự dùng). Để đồng
+nghiệp dùng chung mà **không thấy, không cần nhập key**, bạn cấu hình key ở
+phía server một lần, code sẽ tự lấy và ẩn ô nhập đi.
+
+### Bước dùng chung: tạo file secrets
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+Mở file `.streamlit/secrets.toml` vừa tạo, điền:
+
+```toml
+ANTHROPIC_API_KEY = "sk-ant-key-that-cua-ban"
+APP_PASSWORD = "mat-khau-noi-bo"   # tùy chọn — nên đặt nếu chia sẻ ra ngoài LAN
+```
+
+File này đã được thêm vào `.gitignore` — **không bao giờ commit lên GitHub**.
+Khi `ANTHROPIC_API_KEY` đã có trong secrets, sidebar sẽ tự ẩn ô nhập key và
+hiện dòng "🔑 API key đã được quản trị viên cấu hình sẵn" — đồng nghiệp chỉ
+việc tải file và dịch, không đụng tới key.
+
+`APP_PASSWORD` (tùy chọn) tạo một cổng mật khẩu đơn giản trước khi vào app —
+nên dùng nếu bạn deploy ra ngoài mạng nội bộ, để tránh người lạ dùng ké
+API key (tốn phí) của bạn. Bỏ trống hoặc xóa dòng này nếu chỉ dùng trong
+văn phòng, không cần thiết.
+
+### Cách A — Chia sẻ trong mạng nội bộ (LAN/wifi công ty), nhanh nhất
+
+```bash
+streamlit run mep_translator.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Terminal sẽ in ra một dòng **Network URL**, dạng `http://192.168.x.x:8501`.
+Gửi địa chỉ này cho đồng nghiệp **đang cùng mạng wifi/LAN** với máy bạn, họ
+mở trình duyệt và dán vào là dùng được — máy bạn phải bật app suốt thời gian
+họ dùng. Phù hợp dùng trong văn phòng, không cần đăng ký gì thêm.
+
+### Cách B — Deploy lên Streamlit Community Cloud, dùng được từ xa (miễn phí)
+
+Phù hợp nếu đồng nghiệp không cùng mạng, hoặc bạn muốn app chạy 24/7 không
+cần bật máy tính cá nhân.
+
+1. Push code (không kèm `secrets.toml` thật) lên repo GitHub của bạn — dùng
+   đúng quy trình đã hướng dẫn ở phần trước (`git add . / commit / push`).
+2. Vào **share.streamlit.io**, đăng nhập bằng tài khoản GitHub.
+3. Bấm **New app**, chọn repo (VD: `ThanhNgo81-newdata/ideal-robot`), chọn
+   nhánh `main` và file chính `mep_translator.py`.
+4. Trước khi Deploy, vào mục **Advanced settings → Secrets**, dán y hệt nội
+   dung file `secrets.toml` của bạn vào đó (đây là nơi lưu bí mật riêng của
+   Streamlit Cloud, đã mã hóa, chỉ mình bạn thấy — không liên quan gì tới
+   file trên GitHub).
+5. Bấm **Deploy**. Sau vài phút, bạn nhận được một URL công khai dạng
+   `https://ten-app.streamlit.app` — gửi link này cho đồng nghiệp, họ dùng
+   được từ bất kỳ đâu có internet, key vẫn chỉ nằm trong Secrets của bạn.
+
+## 7. Lưu ý
 
 - PDF dạng scan ảnh (không có lớp văn bản) sẽ không trích xuất được bằng
   pypdf — trong trường hợp đó, chụp ảnh trang cần dịch và tải lên như ảnh.
-- API key được lưu tạm trong phiên làm việc của trình duyệt (session), không
-  ghi ra file — mỗi lần mở lại app cần nhập lại, hoặc bạn có thể sửa code để
-  đọc từ biến môi trường `ANTHROPIC_API_KEY` nếu muốn tiện hơn.
+- Nếu không cấu hình `secrets.toml`, key nhập tay chỉ lưu tạm trong phiên
+  trình duyệt, không ghi ra file — mỗi lần mở lại app cần nhập lại.
 - Tài liệu rất dài sẽ được chia nhỏ để dịch, có thể mất từ vài chục giây đến
   vài phút tùy độ dài.
