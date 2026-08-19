@@ -1,179 +1,132 @@
 # -*- coding: utf-8 -*-
 """
-MEP Translator — Ứng dụng dịch tài liệu kỹ thuật MEP (PDF lớn, Word, Excel, Ảnh)
-Hỗ trợ đa ngôn ngữ (như Google Translate) + chế độ song ngữ (đối chiếu gốc/dịch).
-Chạy bằng: streamlit run mep_translator.py
+MEP Translator v2 — Dịch tài liệu kỹ thuật MEP giữ nguyên cấu trúc file gốc
+(PDF lớn, Word, Excel, Ảnh/ảnh chụp màn hình) — đa ngôn ngữ, có chế độ song ngữ.
+
+Chạy: streamlit run mep_translator.py
 """
 
 import io
-import os
 import json
 import base64
+import copy
 
 import streamlit as st
 import anthropic
-from pypdf import PdfReader
+import pymupdf as fitz
 import docx
+from docx.text.paragraph import Paragraph
 import openpyxl
-from PIL import Image
+from openpyxl.utils import range_boundaries, get_column_letter
+from openpyxl.cell.cell import MergedCell
 
 # ----------------------------------------------------------------------------
 # Cấu hình chung
 # ----------------------------------------------------------------------------
 
 MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 1536
+MAX_TOKENS = 1500
 CHUNK_CHARS = 3000
-XLSX_BATCH_CHARS = 1800
-PDF_LARGE_THRESHOLD_PAGES = 15  # từ ngưỡng này, cho phép chọn khoảng trang
+SEP = "\n@@@BLOCK@@@\n"           # dấu phân cách khi dịch nhiều đoạn trong 1 lần gọi
+PDF_PAGE_WARN_THRESHOLD = 25      # PDF trên ngưỡng này sẽ gợi ý chọn khoảng trang
 
-# Danh sách ngôn ngữ phổ biến (giống Google Translate) — có thể gõ tay ngôn
-# ngữ khác không có trong danh sách qua lựa chọn "Khác...".
-LANGUAGE_PRESETS = [
-    ("en", "Tiếng Anh", "English"),
-    ("vi", "Tiếng Việt", "Vietnamese"),
-    ("ja", "Tiếng Nhật", "Japanese"),
-    ("zh-Hans", "Tiếng Trung (giản thể)", "Chinese (Simplified)"),
-    ("zh-Hant", "Tiếng Trung (phồn thể)", "Chinese (Traditional)"),
-    ("ko", "Tiếng Hàn", "Korean"),
-    ("th", "Tiếng Thái", "Thai"),
-    ("fr", "Tiếng Pháp", "French"),
-    ("de", "Tiếng Đức", "German"),
-    ("es", "Tiếng Tây Ban Nha", "Spanish"),
-    ("pt", "Tiếng Bồ Đào Nha", "Portuguese"),
-    ("it", "Tiếng Ý", "Italian"),
-    ("ru", "Tiếng Nga", "Russian"),
-    ("id", "Tiếng Indonesia", "Indonesian"),
-    ("ms", "Tiếng Mã Lai", "Malay"),
-    ("km", "Tiếng Khmer", "Khmer"),
-    ("lo", "Tiếng Lào", "Lao"),
-    ("hi", "Tiếng Hindi", "Hindi"),
-    ("ar", "Tiếng Ả Rập", "Arabic"),
-    ("other", "Khác... (tự nhập)", None),
-]
-VI_LABEL = {code: vi for code, vi, _ in LANGUAGE_PRESETS}
-EN_LABEL = {code: en for code, _, en in LANGUAGE_PRESETS}
+LANGUAGES_VI = {
+    "en": "Tiếng Anh", "vi": "Tiếng Việt", "zh": "Tiếng Trung", "ja": "Tiếng Nhật",
+    "ko": "Tiếng Hàn", "fr": "Tiếng Pháp", "de": "Tiếng Đức", "th": "Tiếng Thái",
+    "es": "Tiếng Tây Ban Nha", "ru": "Tiếng Nga", "id": "Tiếng Indonesia",
+    "ms": "Tiếng Mã Lai", "km": "Tiếng Khmer", "lo": "Tiếng Lào",
+    "hi": "Tiếng Hindi", "ar": "Tiếng Ả Rập", "pt": "Tiếng Bồ Đào Nha", "it": "Tiếng Ý",
+}
+LANGUAGES_EN = {
+    "en": "English", "vi": "Vietnamese", "zh": "Chinese", "ja": "Japanese",
+    "ko": "Korean", "fr": "French", "de": "German", "th": "Thai",
+    "es": "Spanish", "ru": "Russian", "id": "Indonesian", "ms": "Malay",
+    "km": "Khmer", "lo": "Lao", "hi": "Hindi", "ar": "Arabic",
+    "pt": "Portuguese", "it": "Italian",
+}
 
 GLOSSARY_HINT = (
-    "AHU=Air Handling Unit/Bộ xử lý không khí; FCU=Fan Coil Unit; "
-    "VRV/VRF=máy điều hòa trung tâm; MCCB/ACB=Aptomat; "
-    "tủ điện=electrical panel/switchboard; ống gió=duct/air duct; "
-    "ống nước=pipe/piping; PCCC=fire fighting/fire protection; "
-    "máy bơm=pump; chiller=máy làm lạnh nước; thông gió=ventilation; "
-    "cấp thoát nước=water supply and drainage."
+    "AHU=Air Handling Unit/Bo xu ly khong khi; FCU=Fan Coil Unit; "
+    "VRV/VRF=may dieu hoa trung tam; MCCB/ACB=Aptomat; "
+    "tu dien=electrical panel/switchboard; ong gio=duct/air duct; "
+    "ong nuoc=pipe/piping; PCCC=fire fighting/fire protection; "
+    "may bom=pump; chiller=may lam lanh nuoc; thong gio=ventilation; "
+    "cap thoat nuoc=water supply and drainage."
 )
 
 st.set_page_config(page_title="MEP Translator", page_icon="🛠️", layout="wide")
 
 
 # ----------------------------------------------------------------------------
-# Đọc cấu hình bí mật (API key, mật khẩu truy cập) — server-side, không lộ
-# cho người dùng. Ưu tiên st.secrets (deploy Streamlit Cloud), sau đó tới
-# biến môi trường (chạy local/LAN).
+# Dịch thuật (Anthropic API)
 # ----------------------------------------------------------------------------
-
-def get_secret(key: str, default=None):
-    try:
-        if key in st.secrets:
-            return st.secrets[key]
-    except Exception:
-        pass
-    return os.environ.get(key, default)
-
-
-ADMIN_API_KEY = get_secret("ANTHROPIC_API_KEY")
-APP_PASSWORD = get_secret("APP_PASSWORD")  # để trống nếu không cần cổng mật khẩu
-
-
-def check_password_gate():
-    if not APP_PASSWORD:
-        return True
-    if st.session_state.get("authed"):
-        return True
-    st.title("🛠️ MEP TRANSLATOR")
-    st.caption("Nhập mật khẩu truy cập do quản trị viên cung cấp.")
-    pw = st.text_input("Mật khẩu", type="password")
-    if st.button("Vào ứng dụng"):
-        if pw == APP_PASSWORD:
-            st.session_state.authed = True
-            st.rerun()
-        else:
-            st.error("Sai mật khẩu.")
-    return False
-
-
-# ----------------------------------------------------------------------------
-# Tiện ích dịch thuật
-# ----------------------------------------------------------------------------
-
-def resolve_lang_label(code: str, custom_name: str) -> str:
-    """Trả về tên ngôn ngữ để đưa vào prompt (tiếng Anh cho model dễ hiểu)."""
-    if code == "auto":
-        return "ngôn ngữ nguồn (tự động nhận diện)"
-    if code == "other":
-        return custom_name.strip() or "ngôn ngữ do người dùng chỉ định"
-    return EN_LABEL.get(code, code)
-
-
-def build_system_prompt(src_label: str, tgt_label: str, bilingual: bool) -> str:
-    bilingual_rule = ""
-    if bilingual:
-        bilingual_rule = (
-            "\n- CHẾ ĐỘ SONG NGỮ: với mỗi đoạn được giao, xuất theo đúng khuôn:\n"
-            "  [GỐC]\n<toàn văn đoạn gốc, giữ nguyên>\n\n[DỊCH]\n<bản dịch đoạn đó>\n\n"
-            "  Không thêm gì khác ngoài khuôn này."
-        )
-    return (
-        f"Bạn là chuyên gia dịch thuật kỹ thuật chuyên ngành MEP (Cơ - Điện - Nước: "
-        f"HVAC, hệ thống điện, cấp thoát nước, phòng cháy chữa cháy) trong xây dựng.\n"
-        f"Nhiệm vụ: dịch nội dung từ {src_label} sang {tgt_label}.\n"
-        "Quy tắc bắt buộc:\n"
-        "- Giữ nguyên, không dịch: mã hiệu thiết bị (VD: AHU-01, FCU-12, DB-3F), "
-        "số hiệu tiêu chuẩn (TCVN, QCVN, ASHRAE, NFPA, ASME, SMACNA, IEC), model, "
-        "mã sản phẩm, và đơn vị kỹ thuật (kW, CFM, m3/h, Pa, mmAq, °C, kVA, mm, A, V).\n"
-        f"- Sử dụng thuật ngữ MEP chuẩn ngành. Tham khảo: {GLOSSARY_HINT}\n"
-        "- Giữ nguyên cấu trúc định dạng, bảng biểu, số thứ tự và xuống dòng của "
-        "văn bản gốc càng sát càng tốt."
-        + bilingual_rule +
-        "\n- Không thêm ghi chú, lời giải thích ngoài yêu cầu, không dùng markdown code fence."
-    )
-
 
 def get_client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
-def translate_text_chunk(client, system_prompt: str, chunk: str, bilingual: bool) -> str:
-    instruction = (
-        "Dịch đoạn văn bản kỹ thuật MEP sau đây theo đúng khuôn [GỐC]/[DỊCH] đã quy định "
-        "(một phần trong tài liệu lớn hơn):\n\n" + chunk
-        if bilingual else
-        "Dịch đoạn văn bản kỹ thuật MEP sau đây (một phần trong tài liệu lớn "
-        "hơn, không thêm tiêu đề hay bình luận):\n\n" + chunk
+def build_system_prompt(src_label: str, tgt_label: str) -> str:
+    return (
+        f"Ban la chuyen gia dich thuat ky thuat chuyen nganh MEP (Co - Dien - Nuoc: "
+        f"HVAC, he thong dien, cap thoat nuoc, phong chay chua chay) trong xay dung.\n"
+        f"Nhiem vu: dich noi dung tu {src_label} sang {tgt_label}.\n"
+        "Quy tac bat buoc:\n"
+        "- Giu nguyen, KHONG dich: ma hieu thiet bi (VD: AHU-01, FCU-12, DB-3F), "
+        "so hieu tieu chuan (TCVN, QCVN, ASHRAE, NFPA, ASME, SMACNA, IEC, JIS), model, "
+        "ma san pham, va don vi ky thuat (kW, CFM, m3/h, Pa, mmAq, C, kVA, mm, A, V).\n"
+        f"- Su dung thuat ngu MEP chuan nganh. Tham khao: {GLOSSARY_HINT}\n"
+        "- Giu nguyen cau truc dinh dang, bang bieu, so thu tu va xuong dong cua "
+        "van ban goc cang sat cang tot.\n"
+        "- CHI xuat ra noi dung da dich. Khong them ghi chu, loi giai thich, khong "
+        "lap lai van ban goc, khong dung markdown code fence."
     )
+
+
+def translate_text(client, system_prompt: str, text: str) -> str:
     msg = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=[{"role": "user", "content": instruction}],
+        model=MODEL, max_tokens=MAX_TOKENS, system=system_prompt,
+        messages=[{"role": "user", "content":
+            "Dich doan van ban ky thuat MEP sau (mot phan trong tai lieu lon hon, "
+            "khong them tieu de hay binh luan):\n\n" + text}],
     )
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
-def translate_batch_strings(client, system_prompt: str, items: list) -> list:
-    """Dịch một mảng chuỗi ngắn (dùng cho ô Excel), trả về mảng cùng độ dài."""
+def translate_blocks_batch(client, system_prompt: str, blocks: list) -> list:
+    """Dịch nhiều đoạn văn bản trong 1 lần gọi API, dùng dấu phân cách riêng.
+    Nếu số lượng đoạn trả về không khớp, sẽ dịch lại từng đoạn lẻ để đảm bảo an toàn."""
+    if not blocks:
+        return []
+    joined = SEP.join(blocks)
     prompt = (
         system_prompt
-        + "\n\nDịch từng chuỗi trong mảng JSON sau đây (nội dung ô bảng tính kỹ "
-          "thuật MEP). Chỉ trả về DUY NHẤT một mảng JSON hợp lệ chứa bản dịch, "
-          "cùng số phần tử và đúng thứ tự, không thêm giải thích, không dùng "
-          "code fence:\n\n" + json.dumps(items, ensure_ascii=False)
+        + f"\n\nDich tung doan van ban duoi day. CAC DOAN duoc ngan cach boi dong "
+          f"'{SEP.strip()}' — hay GIU NGUYEN dung dau phan cach nay giua cac ban dich, "
+          f"tra ve dung so luong doan ({len(blocks)} doan), dung thu tu, khong them "
+          "giai thich:\n\n" + joined
     )
-    msg = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
+    msg = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS * 2,
+                                  messages=[{"role": "user", "content": prompt}])
+    raw = "".join(b.text for b in msg.content if b.type == "text").strip()
+    parts = [p.strip() for p in raw.split(SEP.strip())]
+    if len(parts) == len(blocks):
+        return parts
+    return [translate_text(client, system_prompt, b) for b in blocks]
+
+
+def translate_batch_strings(client, system_prompt: str, items: list) -> list:
+    """Dịch mảng chuỗi ngắn (dùng cho ô Excel) qua JSON."""
+    if not items:
+        return []
+    prompt = (
+        system_prompt
+        + "\n\nDich tung chuoi trong mang JSON sau (noi dung o bang tinh ky thuat "
+          "MEP). CHI tra ve DUY NHAT mot mang JSON hop le chua ban dich, cung so "
+          "phan tu va dung thu tu, khong giai thich, khong dung code fence:\n\n"
+          + json.dumps(items, ensure_ascii=False)
     )
+    msg = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
+                                  messages=[{"role": "user", "content": prompt}])
     raw = "".join(b.text for b in msg.content if b.type == "text").strip().strip("`")
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
@@ -183,103 +136,127 @@ def translate_batch_strings(client, system_prompt: str, items: list) -> list:
             return [str(x) for x in arr]
     except Exception:
         pass
-    return items  # fallback: giữ nguyên nếu parse lỗi, để không phá cấu trúc
+    return items
 
 
 def translate_image(client, system_prompt: str, tgt_label: str, image_bytes: bytes,
                      media_type: str, bilingual: bool) -> str:
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    instr = (
+        f"Day la anh chup tai lieu/ban ve/man hinh ky thuat MEP. Nhan dien toan bo "
+        f"van ban trong anh va dich sang {tgt_label}. Giu dung bo cuc bang bieu neu "
+        "co (dung dau | de phan cach cot)."
+    )
     if bilingual:
-        instruction = (
-            "Đây là ảnh chụp tài liệu/bản vẽ kỹ thuật MEP. Hãy nhận diện toàn bộ văn bản "
-            f"trong ảnh, sau đó xuất theo đúng khuôn:\n[GỐC]\n<toàn bộ văn bản nhận diện được>\n\n"
-            f"[DỊCH]\n<bản dịch sang {tgt_label}>\n\nGiữ đúng bố cục bảng biểu nếu có (dùng dấu | "
-            "để phân cách cột)."
+        instr += (
+            " Trinh bay SONG NGU: voi moi dong/khoi noi dung, hien dong goc truoc, "
+            "ngay ben duoi la dong da dich trong ngoac [ ]."
         )
-    else:
-        instruction = (
-            f"Đây là ảnh chụp tài liệu/bản vẽ kỹ thuật MEP. Hãy nhận diện toàn "
-            f"bộ văn bản trong ảnh và dịch sang {tgt_label}. Giữ đúng bố cục "
-            "bảng biểu nếu có (dùng dấu | để phân cách cột). Chỉ xuất bản dịch, "
-            "không giải thích."
-        )
+    instr += " Chi xuat noi dung da xu ly, khong giai thich them."
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
     msg = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                {"type": "text", "text": instruction},
-            ],
-        }],
+        model=MODEL, max_tokens=MAX_TOKENS, system=system_prompt,
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+            {"type": "text", "text": instr},
+        ]}],
     )
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
-def chunk_text(text: str, max_chars: int = CHUNK_CHARS) -> list:
-    paras = text.split("\n\n")
-    chunks, cur = [], ""
-    for p in paras:
-        if len(cur) + len(p) + 2 > max_chars and cur:
-            chunks.append(cur)
-            cur = p
-        else:
-            cur = (cur + "\n\n" + p) if cur else p
-    if cur:
-        chunks.append(cur)
-    final = []
-    for c in chunks:
-        if len(c) <= max_chars:
-            final.append(c)
-        else:
-            final.extend(c[i:i + max_chars] for i in range(0, len(c), max_chars))
-    return final
-
-
 # ----------------------------------------------------------------------------
-# Trích xuất nội dung từ tệp
+# WORD (.docx) — dịch tại chỗ, giữ nguyên style/heading/bảng/bullet
 # ----------------------------------------------------------------------------
 
-def pdf_page_count(file_bytes: bytes) -> int:
-    return len(PdfReader(io.BytesIO(file_bytes)).pages)
+def insert_paragraph_after(paragraph: Paragraph, text: str, italic=True):
+    """Chèn 1 đoạn mới ngay sau paragraph, sao chép định dạng — dùng cho bản song ngữ."""
+    new_p = copy.deepcopy(paragraph._p)
+    paragraph._p.addnext(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    for run in list(new_para.runs):
+        run.text = ""
+    if new_para.runs:
+        new_para.runs[0].text = text
+        new_para.runs[0].italic = italic
+        for r in new_para.runs[1:]:
+            r.text = ""
+    else:
+        r = new_para.add_run(text)
+        r.italic = italic
+    return new_para
 
 
-def extract_pdf(file_bytes: bytes, page_from: int = None, page_to: int = None, progress_cb=None) -> str:
-    reader = PdfReader(io.BytesIO(file_bytes))
-    n = len(reader.pages)
-    start = (page_from - 1) if page_from else 0
-    end = page_to if page_to else n
-    start = max(0, min(start, n))
-    end = max(start, min(end, n))
-    parts = []
-    total = end - start
-    for idx, i in enumerate(range(start, end), start=1):
-        t = reader.pages[i].extract_text() or ""
-        parts.append((f"\n\n--- Trang {i+1} ---\n\n" if idx > 1 else "") + t)
-        if progress_cb and total > 0:
-            progress_cb(idx / total, i + 1)
-    text = "".join(parts).strip()
-    if not text:
-        raise ValueError("Không tìm thấy văn bản trong PDF (có thể là bản scan ảnh). Hãy dùng chế độ ảnh.")
-    return text
-
-
-def extract_docx(file_bytes: bytes) -> str:
+def translate_docx(client, system_prompt: str, file_bytes: bytes, bilingual: bool, progress_cb=None):
     d = docx.Document(io.BytesIO(file_bytes))
-    paras = [p.text for p in d.paragraphs if p.text.strip()]
+
+    targets = []
+    for p in d.paragraphs:
+        if p.text.strip():
+            targets.append(p)
     for table in d.tables:
         for row in table.rows:
-            paras.append(" | ".join(c.text for c in row.cells))
-    text = "\n\n".join(paras).strip()
-    if not text:
-        raise ValueError("Tài liệu Word không có nội dung văn bản.")
-    return text
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    if p.text.strip():
+                        targets.append(p)
+
+    original_preview = "\n\n".join(t.text for t in targets)
+
+    BATCH = 12
+    translated_all = []
+    total = max(1, (len(targets) + BATCH - 1) // BATCH)
+    for i in range(0, len(targets), BATCH):
+        batch = targets[i:i + BATCH]
+        texts = [t.text for t in batch]
+        translated_all.extend(translate_blocks_batch(client, system_prompt, texts))
+        if progress_cb:
+            progress_cb(min(100, int(((i // BATCH) + 1) / total * 100)))
+
+    for para, tvalue in reversed(list(zip(targets, translated_all))):
+        if bilingual:
+            insert_paragraph_after(para, tvalue, italic=True)
+        else:
+            runs = para.runs
+            if runs:
+                runs[0].text = tvalue
+                for r in runs[1:]:
+                    r.text = ""
+            else:
+                para.add_run(tvalue)
+
+    out = io.BytesIO()
+    d.save(out)
+    return original_preview, "\n\n".join(translated_all), out.getvalue()
 
 
-def extract_xlsx(file_bytes: bytes):
-    """Trả về (workbook, list_of_cell_refs, preview_text)."""
+# ----------------------------------------------------------------------------
+# EXCEL (.xlsx) — dịch tại chỗ, giữ nguyên sheet/style/merge/formula
+# ----------------------------------------------------------------------------
+
+def insert_column_with_merge_fix(ws, insert_idx: int):
+    """Chèn 1 cột tại vị trí insert_idx (1-based), tự giãn các vùng merge bị
+    ảnh hưởng để không vỡ layout (ô tiêu đề merge nhiều cột, v.v.)."""
+    merges = list(ws.merged_cells.ranges)
+    for m in merges:
+        ws.unmerge_cells(str(m))
+    ws.insert_cols(insert_idx)
+    for m in merges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(m))
+        if min_col >= insert_idx:
+            min_col += 1
+        if max_col >= insert_idx:
+            max_col += 1
+        ws.merge_cells(f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}")
+
+
+def copy_cell_style(src_cell, dst_cell):
+    dst_cell.font = copy.copy(src_cell.font)
+    dst_cell.fill = copy.copy(src_cell.fill)
+    dst_cell.border = copy.copy(src_cell.border)
+    dst_cell.alignment = copy.copy(src_cell.alignment)
+    dst_cell.number_format = src_cell.number_format
+
+
+def translate_xlsx(client, system_prompt: str, file_bytes: bytes, bilingual: bool, progress_cb=None):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
     refs = []
     preview_lines = []
@@ -289,26 +266,151 @@ def extract_xlsx(file_bytes: bytes):
             row_vals = []
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.strip():
-                    refs.append({"sheet": ws.title, "coord": cell.coordinate, "text": cell.value})
+                    refs.append({"sheet": ws.title, "coord": cell.coordinate, "text": cell.value,
+                                 "row": cell.row, "col": cell.column})
                 row_vals.append("" if cell.value is None else str(cell.value))
             if any(v.strip() for v in row_vals):
                 preview_lines.append(" | ".join(row_vals))
     if not refs:
-        raise ValueError("Không tìm thấy nội dung dạng chữ trong bảng tính.")
-    return wb, refs, "\n".join(preview_lines).strip()
+        raise ValueError("Khong tim thay noi dung dang chu trong bang tinh.")
+
+    batches, cur, cur_len = [], [], 0
+    for r in refs:
+        l = len(r["text"]) + 4
+        if cur_len + l > 1800 and cur:
+            batches.append(cur)
+            cur, cur_len = [], 0
+        cur.append(r)
+        cur_len += l
+    if cur:
+        batches.append(cur)
+
+    for bi, batch in enumerate(batches):
+        texts = [r["text"] for r in batch]
+        translated_vals = translate_batch_strings(client, system_prompt, texts)
+        for r, tval in zip(batch, translated_vals):
+            r["translated"] = tval
+        if progress_cb:
+            progress_cb(int((bi + 1) / len(batches) * 100))
+
+    if bilingual:
+        # Song ngữ theo kiểu "cột kề cột" ngay trong sheet gốc: với mỗi cột có
+        # chữ, chèn 1 cột dịch ngay bên phải, giữ nguyên cột gốc — xử lý từ
+        # cột phải nhất về trái để không lệch chỉ số cột khi chèn.
+        # Riêng các ô tiêu đề bị merge rộng (banner nhiều cột) không chèn cột
+        # được (ô bên cạnh vẫn thuộc vùng merge) — với các ô này, gộp bản dịch
+        # ngay trong cùng ô (gốc / dịch).
+        for ws in wb.worksheets:
+            sheet_refs = [r for r in refs if r["sheet"] == ws.title]
+            if not sheet_refs:
+                continue
+
+            wide_merge_coords = set()
+            for m in ws.merged_cells.ranges:
+                if m.max_col > m.min_col:  # merge trải rộng nhiều cột
+                    wide_merge_coords.add((m.min_row, m.min_col))
+
+            normal_refs, wide_refs = [], []
+            for r in sheet_refs:
+                (wide_refs if (r["row"], r["col"]) in wide_merge_coords else normal_refs).append(r)
+
+            # Ô tiêu đề merge rộng: gộp gốc/dịch trong cùng ô
+            for r in wide_refs:
+                cell = ws.cell(row=r["row"], column=r["col"])
+                cell.value = f"{r['text']}  /  {r.get('translated', '')}"
+
+            # Ô dữ liệu thường: chèn cột dịch kề bên
+            cols_with_text = sorted(set(r["col"] for r in normal_refs), reverse=True)
+            for col_idx in cols_with_text:
+                insert_column_with_merge_fix(ws, col_idx + 1)
+                src_letter = get_column_letter(col_idx)
+                new_letter = get_column_letter(col_idx + 1)
+                if src_letter in ws.column_dimensions:
+                    ws.column_dimensions[new_letter].width = ws.column_dimensions[src_letter].width
+                for r in normal_refs:
+                    if r["col"] == col_idx:
+                        dst_cell = ws.cell(row=r["row"], column=col_idx + 1)
+                        if isinstance(dst_cell, MergedCell):
+                            # an toàn dự phòng: nếu vẫn rơi vào vùng merge, gộp
+                            # vào ô gốc thay vì ghi đè (tránh crash)
+                            src_cell = ws.cell(row=r["row"], column=col_idx)
+                            src_cell.value = f"{r['text']}  /  {r.get('translated', '')}"
+                            continue
+                        src_cell = ws.cell(row=r["row"], column=col_idx)
+                        dst_cell.value = r.get("translated", "")
+                        copy_cell_style(src_cell, dst_cell)
+    else:
+        for r in refs:
+            wb[r["sheet"]][r["coord"]] = r.get("translated", r["text"])
+
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    original_preview = "\n".join(preview_lines).strip()
+    translated_preview = "\n".join(f"{r['sheet']}!{r['coord']}: {r.get('translated','')}" for r in refs)
+    return original_preview, translated_preview, out_buf.getvalue()
 
 
-def build_bilingual_xlsx(wb, refs) -> bytes:
-    """Thêm sheet đối chiếu Gốc/Dịch, đồng thời ghi đè workbook bằng bản dịch."""
-    ws2 = wb.create_sheet("Song ngữ (đối chiếu)")
-    ws2.append(["Sheet gốc", "Ô", "Nội dung gốc", "Bản dịch"])
-    for r in refs:
-        ws2.append([r["sheet"], r["coord"], r["text"], r.get("translated", "")])
-    for r in refs:
-        wb[r["sheet"]][r["coord"]] = r.get("translated", r["text"])
+# ----------------------------------------------------------------------------
+# PDF (kể cả PDF lớn) — trích xuất theo block/trang, xuất ra DOCX giữ đúng
+# thứ tự đọc + ngắt trang gốc (không ghi đè trực tiếp lên PDF để tránh lỗi
+# hiển thị dấu tiếng Việt / chữ Hán / chữ Nhật do thiếu font nhúng sẵn).
+# ----------------------------------------------------------------------------
+
+def get_pdf_page_count(file_bytes: bytes) -> int:
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    n = doc.page_count
+    doc.close()
+    return n
+
+
+def extract_pdf_blocks(file_bytes: bytes, page_from: int, page_to: int):
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    pages_blocks = []
+    for pno in range(page_from - 1, page_to):
+        page = doc.load_page(pno)
+        blocks = page.get_text("blocks")
+        blocks = sorted(blocks, key=lambda b: (round(b[1], 1), round(b[0], 1)))
+        texts = [b[4].strip() for b in blocks if b[4] and b[4].strip()]
+        if texts:
+            pages_blocks.append((pno + 1, texts))
+    doc.close()
+    if not pages_blocks:
+        raise ValueError("Khong trich xuat duoc van ban trong khoang trang da chon "
+                          "(co the la PDF dang scan anh — hay chup man hinh trang do "
+                          "va dung che do Anh thay the).")
+    return pages_blocks
+
+
+def translate_pdf_to_docx(client, system_prompt: str, file_bytes: bytes,
+                           page_from: int, page_to: int, bilingual: bool, progress_cb=None):
+    pages_blocks = extract_pdf_blocks(file_bytes, page_from, page_to)
+
+    out_doc = docx.Document()
+    out_doc.add_heading("Bản dịch tài liệu PDF (MEP Translator)", level=1)
+
+    original_parts, translated_parts = [], []
+    total_pages = len(pages_blocks)
+    for idx, (pno, texts) in enumerate(pages_blocks):
+        out_doc.add_heading(f"Trang {pno}", level=2)
+        translated_texts = translate_blocks_batch(client, system_prompt, texts)
+        for orig, tval in zip(texts, translated_texts):
+            if bilingual:
+                p1 = out_doc.add_paragraph(orig)
+                if p1.runs:
+                    p1.runs[0].italic = True
+                out_doc.add_paragraph(tval)
+            else:
+                out_doc.add_paragraph(tval)
+        original_parts.append(f"--- Trang {pno} ---\n" + "\n\n".join(texts))
+        translated_parts.append(f"--- Trang {pno} ---\n" + "\n\n".join(translated_texts))
+        if progress_cb:
+            progress_cb(int((idx + 1) / total_pages * 100))
+        if idx < total_pages - 1:
+            out_doc.add_page_break()
+
     out = io.BytesIO()
-    wb.save(out)
-    return out.getvalue()
+    out_doc.save(out)
+    return "\n\n".join(original_parts), "\n\n".join(translated_parts), out.getvalue()
 
 
 # ----------------------------------------------------------------------------
@@ -327,47 +429,78 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if not check_password_gate():
-    st.stop()
-
 st.title("🛠️ MEP TRANSLATOR")
-st.caption("Dịch tài liệu kỹ thuật MEP (Cơ – Điện – Nước) từ PDF lớn, Word, Excel, Ảnh — đa ngôn ngữ, hỗ trợ song ngữ.")
+st.caption("Dịch tài liệu kỹ thuật MEP (Cơ – Điện – Nước) — PDF lớn, Word, Excel, Ảnh/ảnh chụp màn hình — đa ngôn ngữ, giữ nguyên cấu trúc file gốc.")
+
+
+def get_secret(key: str) -> str:
+    """Đọc giá trị từ .streamlit/secrets.toml nếu có; trả về '' nếu không có file/khóa đó."""
+    try:
+        return st.secrets.get(key, "")
+    except Exception:
+        return ""
+
+
+# ---- Cổng mật khẩu tùy chọn — chỉ bật khi APP_PASSWORD được cấu hình trong secrets.toml ----
+_app_password = get_secret("APP_PASSWORD")
+if _app_password:
+    if "authed" not in st.session_state:
+        st.session_state.authed = False
+    if not st.session_state.authed:
+        pwd = st.text_input("Nhập mật khẩu truy cập", type="password")
+        if pwd == _app_password:
+            st.session_state.authed = True
+            st.rerun()
+        elif pwd:
+            st.error("Sai mật khẩu.")
+        st.stop()
 
 with st.sidebar:
     st.header("Cấu hình")
-    if ADMIN_API_KEY:
-        api_key = ADMIN_API_KEY
-        st.success("🔑 API key đã được quản trị viên cấu hình sẵn.")
+    _secret_key = get_secret("ANTHROPIC_API_KEY")
+    if _secret_key:
+        api_key = _secret_key
+        st.success("🔑 API key đã được cấu hình sẵn.")
     else:
-        api_key = st.text_input("Anthropic API key", type="password", help="Dạng sk-ant-... — lấy tại console.anthropic.com")
+        api_key = st.text_input("Anthropic API key", type="password",
+                                 help="Dạng sk-ant-... — lấy tại console.anthropic.com")
     st.markdown("---")
 
-    src_codes = ["auto"] + [c for c, _, _ in LANGUAGE_PRESETS]
-    src = st.selectbox("Ngôn ngữ nguồn", src_codes,
-                        format_func=lambda k: "Tự động nhận diện" if k == "auto" else VI_LABEL[k])
-    src_custom = ""
-    if src == "other":
-        src_custom = st.text_input("Nhập tên ngôn ngữ nguồn", placeholder="VD: Tiếng Miến Điện / Burmese")
+    lang_keys = list(LANGUAGES_VI.keys())
+    src_options = ["auto"] + lang_keys + ["other"]
+    tgt_options = lang_keys + ["other"]
 
-    tgt_codes = [c for c, _, _ in LANGUAGE_PRESETS]
-    tgt = st.selectbox("Ngôn ngữ đích", tgt_codes, index=1, format_func=lambda k: VI_LABEL[k])
-    tgt_custom = ""
-    if tgt == "other":
-        tgt_custom = st.text_input("Nhập tên ngôn ngữ đích", placeholder="VD: Tiếng Miến Điện / Burmese")
+    src = st.selectbox("Ngôn ngữ nguồn", src_options,
+                        format_func=lambda k: "Tự động nhận diện" if k == "auto"
+                        else ("Khác (tự nhập)" if k == "other" else LANGUAGES_VI[k]))
+    src_custom = st.text_input("→ Nhập tên ngôn ngữ nguồn (tiếng Anh)", disabled=(src != "other"))
+
+    tgt = st.selectbox("Ngôn ngữ đích", tgt_options,
+                        format_func=lambda k: "Khác (tự nhập)" if k == "other" else LANGUAGES_VI[k])
+    tgt_custom = st.text_input("→ Nhập tên ngôn ngữ đích (tiếng Anh)", disabled=(tgt != "other"))
 
     st.markdown("---")
-    bilingual = st.toggle("📖 Chế độ song ngữ (đối chiếu Gốc/Dịch)", value=False,
-                           help="Kết quả hiển thị cả đoạn gốc và bản dịch xen kẽ, thay vì chỉ bản dịch.")
+    bilingual = st.checkbox("🈯 Dịch song ngữ (giữ cả bản gốc + bản dịch)", value=False)
     st.markdown("---")
-    st.caption("Chuyên ngành: tối ưu cho kỹ sư MEP — giữ nguyên mã thiết bị, tiêu chuẩn (TCVN/QCVN/ASHRAE/NFPA) và đơn vị kỹ thuật.")
+    st.caption("Chuyên ngành: tối ưu cho kỹ sư MEP — giữ nguyên mã thiết bị, tiêu chuẩn "
+               "(TCVN/QCVN/ASHRAE/NFPA) và đơn vị kỹ thuật.")
+
+
+def resolve_lang_label(code, custom_text, table):
+    if code == "other":
+        return custom_text.strip() if custom_text.strip() else "the target language"
+    return table[code]
+
 
 uploaded = st.file_uploader(
-    "Tải lên tệp cần dịch (PDF, DOCX, XLSX/XLS, JPG, PNG) — hỗ trợ PDF nhiều trang",
+    "Tải lên tệp cần dịch (PDF, DOCX, XLSX/XLS, JPG, PNG — kể cả ảnh chụp màn hình)",
     type=["pdf", "docx", "xlsx", "xls", "jpg", "jpeg", "png", "webp"],
 )
 
 if "result" not in st.session_state:
     st.session_state.result = None
+
+page_from, page_to = None, None
 
 if uploaded is not None:
     kind = uploaded.name.lower().rsplit(".", 1)[-1]
@@ -376,105 +509,59 @@ if uploaded is not None:
 
     st.write(f"**Tệp:** {uploaded.name} · **Loại:** {kind.upper()} · **Kích thước:** {len(file_bytes)/1024:.0f} KB")
 
-    page_from, page_to = None, None
     if kind == "pdf":
         try:
-            n_pages = pdf_page_count(file_bytes)
+            n_pages = get_pdf_page_count(file_bytes)
             st.write(f"**Số trang:** {n_pages}")
-            if n_pages > PDF_LARGE_THRESHOLD_PAGES:
-                st.info(
-                    f"PDF này có {n_pages} trang — để kiểm soát thời gian/chi phí, bạn có thể "
-                    "chọn khoảng trang cần dịch thay vì dịch toàn bộ."
-                )
-                pr = st.slider("Khoảng trang cần dịch", 1, n_pages, (1, min(n_pages, 30)))
-                page_from, page_to = pr[0], pr[1]
-        except Exception:
-            n_pages = None
+            if n_pages > PDF_PAGE_WARN_THRESHOLD:
+                st.warning(f"PDF có {n_pages} trang — dịch toàn bộ có thể mất khá lâu và tốn "
+                           "nhiều lượt gọi API. Bạn có thể chọn khoảng trang cần dịch bên dưới.")
+            c1, c2 = st.columns(2)
+            page_from = c1.number_input("Từ trang", min_value=1, max_value=n_pages, value=1)
+            page_to = c2.number_input("Đến trang", min_value=1, max_value=n_pages, value=n_pages)
+        except Exception as e:
+            st.error(f"Không đọc được PDF: {e}")
 
     if st.button("🌐 Dịch tài liệu", type="primary", disabled=not api_key):
         if not api_key:
             st.error("Vui lòng nhập Anthropic API key ở thanh bên trái.")
-        elif src == "other" and not src_custom.strip():
-            st.error("Vui lòng nhập tên ngôn ngữ nguồn.")
-        elif tgt == "other" and not tgt_custom.strip():
-            st.error("Vui lòng nhập tên ngôn ngữ đích.")
         else:
             try:
                 client = get_client(api_key)
-                src_label = resolve_lang_label(src, src_custom)
-                tgt_label = resolve_lang_label(tgt, tgt_custom)
-                system_prompt = build_system_prompt(src_label, tgt_label, bilingual)
+                src_label = ("ngon ngu nguon (tu dong nhan dien)" if src == "auto"
+                              else resolve_lang_label(src, src_custom, LANGUAGES_EN))
+                tgt_label = resolve_lang_label(tgt, tgt_custom, LANGUAGES_EN)
+                system_prompt = build_system_prompt(src_label, tgt_label)
 
                 progress = st.progress(0, text="Đang xử lý...")
 
+                def cb(pct):
+                    progress.progress(min(100, pct), text=f"Đang dịch... {pct}%")
+
                 if kind == "pdf":
-                    def _extract_progress(frac, page_no):
-                        progress.progress(min(int(frac * 15), 15), text=f"Đang trích xuất trang {page_no}...")
-                    original = extract_pdf(file_bytes, page_from, page_to, progress_cb=_extract_progress)
-                    chunks = chunk_text(original)
-                    out = []
-                    for i, c in enumerate(chunks):
-                        pct = 15 + int((i / len(chunks)) * 85)
-                        progress.progress(pct, text=f"Đang dịch đoạn {i+1}/{len(chunks)}")
-                        out.append(translate_text_chunk(client, system_prompt, c, bilingual))
-                    translated = "\n\n".join(out)
-                    st.session_state.result = {"kind": "text", "original": original, "translated": translated, "name": uploaded.name}
+                    original, translated, out_bytes = translate_pdf_to_docx(
+                        client, system_prompt, file_bytes, int(page_from), int(page_to), bilingual, cb)
+                    st.session_state.result = {"kind": "pdf", "original": original, "translated": translated,
+                                                "docx_bytes": out_bytes, "name": uploaded.name}
 
                 elif kind == "docx":
-                    original = extract_docx(file_bytes)
-                    chunks = chunk_text(original)
-                    out = []
-                    for i, c in enumerate(chunks):
-                        progress.progress(int((i / len(chunks)) * 100), text=f"Đang dịch đoạn {i+1}/{len(chunks)}")
-                        out.append(translate_text_chunk(client, system_prompt, c, bilingual))
-                    translated = "\n\n".join(out)
-                    st.session_state.result = {"kind": "text", "original": original, "translated": translated, "name": uploaded.name}
+                    original, translated, out_bytes = translate_docx(
+                        client, system_prompt, file_bytes, bilingual, cb)
+                    st.session_state.result = {"kind": "docx", "original": original, "translated": translated,
+                                                "docx_bytes": out_bytes, "name": uploaded.name}
 
                 elif kind == "xlsx":
-                    wb, refs, preview = extract_xlsx(file_bytes)
-                    batches, cur, cur_len = [], [], 0
-                    for r in refs:
-                        l = len(r["text"]) + 4
-                        if cur_len + l > XLSX_BATCH_CHARS and cur:
-                            batches.append(cur)
-                            cur, cur_len = [], 0
-                        cur.append(r)
-                        cur_len += l
-                    if cur:
-                        batches.append(cur)
-
-                    for bi, batch in enumerate(batches):
-                        progress.progress(int((bi / len(batches)) * 100), text=f"Đang dịch bảng tính — lô {bi+1}/{len(batches)}")
-                        texts = [r["text"] for r in batch]
-                        translated_vals = translate_batch_strings(client, system_prompt, texts)
-                        for r, tval in zip(batch, translated_vals):
-                            r["translated"] = tval
-
-                    if bilingual:
-                        workbook_bytes = build_bilingual_xlsx(wb, refs)
-                        translated_preview = "\n".join(
-                            f"[{r['sheet']}!{r['coord']}]\nGỐC: {r['text']}\nDỊCH: {r.get('translated','')}\n" for r in refs
-                        )
-                    else:
-                        for r in refs:
-                            wb[r["sheet"]][r["coord"]] = r.get("translated", r["text"])
-                        out_buf = io.BytesIO()
-                        wb.save(out_buf)
-                        workbook_bytes = out_buf.getvalue()
-                        translated_preview = "\n".join(
-                            f"{r['sheet']}!{r['coord']}: {r.get('translated','')}" for r in refs
-                        )
-
-                    st.session_state.result = {
-                        "kind": "xlsx", "original": preview, "translated": translated_preview,
-                        "workbook_bytes": workbook_bytes, "name": uploaded.name,
-                    }
+                    original, translated, out_bytes = translate_xlsx(
+                        client, system_prompt, file_bytes, bilingual, cb)
+                    st.session_state.result = {"kind": "xlsx", "original": original, "translated": translated,
+                                                "xlsx_bytes": out_bytes, "name": uploaded.name}
 
                 elif kind == "image":
                     media_type = uploaded.type or "image/png"
                     translated = translate_image(client, system_prompt, tgt_label, file_bytes, media_type, bilingual)
-                    progress.progress(100, text="Hoàn tất")
-                    st.session_state.result = {"kind": "image", "original": "(nội dung ảnh)", "translated": translated, "name": uploaded.name}
+                    cb(100)
+                    st.session_state.result = {"kind": "image", "original": "(nội dung ảnh — xem tab Bản dịch)",
+                                                "translated": translated, "name": uploaded.name}
 
                 progress.progress(100, text="Hoàn tất")
                 st.success("Đã dịch xong.")
@@ -483,19 +570,21 @@ if uploaded is not None:
 
 if st.session_state.result:
     res = st.session_state.result
-    tab1, tab2 = st.tabs(["📄 Văn bản gốc", "🌐 Bản dịch" + (" (song ngữ)" if bilingual else "")])
+    tab1, tab2 = st.tabs(["📄 Văn bản gốc", "🌐 Bản dịch"])
     with tab1:
-        st.text_area("Gốc", res["original"], height=400, label_visibility="collapsed")
+        st.text_area("Gốc", res["original"], height=420, label_visibility="collapsed")
     with tab2:
-        st.text_area("Dịch", res["translated"], height=400, label_visibility="collapsed")
+        st.text_area("Dịch", res["translated"], height=420, label_visibility="collapsed")
 
         base_name = res["name"].rsplit(".", 1)[0]
-        suffix = "_bilingual" if bilingual else "_translated"
-        st.download_button("⬇️ Tải bản dịch (.txt)", res["translated"], file_name=f"{base_name}{suffix}.txt")
-        if res["kind"] == "xlsx" and "workbook_bytes" in res:
-            st.download_button(
-                "⬇️ Tải bảng tính đã dịch (.xlsx)",
-                res["workbook_bytes"],
-                file_name=f"{base_name}{suffix}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.download_button("⬇️ Tải bản dịch (.txt)", res["translated"], file_name=f"{base_name}_translated.txt")
+
+        if res["kind"] in ("docx", "pdf") and "docx_bytes" in res:
+            label = "⬇️ Tải Word đã dịch (.docx)" if res["kind"] == "docx" else "⬇️ Tải Word tái dựng từ PDF (.docx)"
+            st.download_button(label, res["docx_bytes"], file_name=f"{base_name}_translated.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+        if res["kind"] == "xlsx" and "xlsx_bytes" in res:
+            st.download_button("⬇️ Tải bảng tính đã dịch (.xlsx)", res["xlsx_bytes"],
+                                file_name=f"{base_name}_translated.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
