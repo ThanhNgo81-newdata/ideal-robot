@@ -46,14 +46,27 @@ thanh bên trái, chọn ngôn ngữ nguồn/đích, tải tệp lên và bấm 
 
 ## 5. Tính năng
 
-- **Định dạng hỗ trợ:** PDF, Word (.docx), Excel (.xlsx/.xls), ảnh (JPG/PNG/WEBP).
-- **Cặp ngôn ngữ:** Anh↔Việt, Trung→Anh, Trung→Việt và các chiều khác
-  (Anh/Việt/Trung, có chế độ tự động nhận diện ngôn ngữ nguồn).
+- **Định dạng hỗ trợ:** PDF (kể cả PDF nhiều trang/PDF lớn), Word (.docx),
+  Excel (.xlsx/.xls), ảnh (JPG/PNG/WEBP).
+- **Đa ngôn ngữ như Google Translate:** Anh, Việt, Nhật, Trung (giản thể/phồn
+  thể), Hàn, Thái, Pháp, Đức, Tây Ban Nha, Bồ Đào Nha, Ý, Nga, Indonesia, Mã
+  Lai, Khmer, Lào, Hindi, Ả Rập... dịch được **theo mọi chiều** giữa các ngôn
+  ngữ này (không chỉ Anh/Việt/Trung), có chế độ **tự động nhận diện ngôn ngữ
+  nguồn**, và tùy chọn **"Khác... (tự nhập)"** để gõ tên một ngôn ngữ bất kỳ
+  không có trong danh sách.
+- **Chế độ song ngữ (bật/tắt ở sidebar):** kết quả hiển thị đối chiếu đoạn
+  gốc và bản dịch xen kẽ (khuôn `[GỐC]` / `[DỊCH]`) thay vì chỉ hiện bản dịch
+  — tiện đối chiếu thuật ngữ khi làm hồ sơ thầu, specification song ngữ.
+  Với Excel, chế độ này tạo thêm 1 sheet **"Song ngữ (đối chiếu)"** liệt kê
+  đầy đủ gốc/dịch theo từng ô, bên cạnh các sheet đã dịch.
+- **PDF lớn:** tự phát hiện số trang; nếu PDF vượt quá 15 trang, app cho phép
+  **chọn khoảng trang cần dịch** (thay vì bắt buộc dịch toàn bộ) để kiểm soát
+  thời gian chờ và chi phí API — trích xuất và hiện tiến trình theo từng trang.
 - **Chuyên ngành MEP:** giữ nguyên mã thiết bị (AHU-01, FCU...), tiêu chuẩn
   (TCVN, QCVN, ASHRAE, NFPA...), đơn vị kỹ thuật (kW, CFM, Pa...); dùng thuật
-  ngữ MEP chuẩn ngành Cơ - Điện - Nước.
-- **Excel:** dịch từng ô, giữ nguyên cấu trúc bảng, tải về file .xlsx đã dịch —
-  phù hợp để dịch bảng thống kê thiết bị (schedule).
+  ngữ MEP chuẩn ngành Cơ - Điện - Nước cho mọi cặp ngôn ngữ ở trên.
+- **Excel:** dịch từng ô, giữ nguyên cấu trúc bảng, tải về file .xlsx đã dịch
+  (hoặc bản song ngữ) — phù hợp để dịch bảng thống kê thiết bị (schedule).
 - **PDF/Word/Ảnh:** trích xuất văn bản, dịch theo đoạn, xem song song bản
   gốc/bản dịch, tải về .txt.
 
@@ -123,3 +136,9 @@ cần bật máy tính cá nhân.
   trình duyệt, không ghi ra file — mỗi lần mở lại app cần nhập lại.
 - Tài liệu rất dài sẽ được chia nhỏ để dịch, có thể mất từ vài chục giây đến
   vài phút tùy độ dài.
+- PDF càng nhiều trang, số lượt gọi API càng nhiều → thời gian chờ và chi phí
+  càng tăng tuyến tính. Với PDF rất lớn (trăm trang), nên dùng tính năng chọn
+  khoảng trang để dịch từng phần thay vì dịch một lần toàn bộ tài liệu.
+- Chế độ song ngữ dùng cùng số lượt gọi API như chế độ dịch thường (chỉ đổi
+  định dạng phản hồi), nhưng phản hồi dài hơn (có cả gốc lẫn dịch) nên có thể
+  tốn nhiều token đầu ra hơn một chút.
