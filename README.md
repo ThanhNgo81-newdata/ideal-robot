@@ -1,12 +1,19 @@
 # 🛠️ MEP Translator (Offline)
 
 Ứng dụng dịch tài liệu kỹ thuật MEP (Cơ – Điện – Nước) hỗ trợ **DOCX, PDF, Excel, TXT**.  
-Chạy hoàn toàn **offline bằng Hugging Face**, không cần API key.
+Chạy hoàn toàn **offline bằng Hugging Face**, không cần API key.  
+Có chế độ **song ngữ**: giữ nguyên nội dung gốc và hiển thị bản dịch ngay bên dưới hoặc bên cạnh.
+
+---
 
 ## ✨ Tính năng
-- Dịch tài liệu kỹ thuật MEP đa ngôn ngữ (Anh, Việt, Pháp, Đức, Trung, Nhật, Hàn, Tây Ban Nha, Nga, Bồ Đào Nha, Ý…).
+- Dịch đa ngôn ngữ (Anh, Việt, Pháp, Đức, Trung, Nhật, Hàn, Tây Ban Nha, Nga, Bồ Đào Nha, Ý…).
 - Giữ nguyên cấu trúc file gốc (Word, Excel, PDF).
-- Chạy offline, không phụ thuộc vào dịch vụ bên ngoài.
+- Chế độ song ngữ:
+  - DOCX: đoạn gốc + bản dịch ngay dưới.
+  - PDF: xuất ra DOCX, block gốc + bản dịch ngay dưới.
+  - Excel: chèn thêm cột kế bên chứa bản dịch.
+  - TXT: ghép gốc + dịch trong cùng file.
 - Giao diện web thân thiện với **Streamlit**.
 
 ---
@@ -15,5 +22,5 @@ Chạy hoàn toàn **offline bằng Hugging Face**, không cần API key.
 
 ### 1. Clone repo
 ```bash
-git clone https://github.com/ThanhNgo81-newdata/ideal-robot.git
-cd ideal-robot
+git clone https://github.com/<username>/<repo>.git
+cd <repo>
