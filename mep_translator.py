@@ -10,9 +10,9 @@ import io
 import json
 import base64
 import copy
-
+import fitz  # PyMuPDF
 import streamlit as st
-import pymupdf as fitz
+
 import docx
 from docx.text.paragraph import Paragraph
 import openpyxl
