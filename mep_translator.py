@@ -6,6 +6,7 @@ import io
 import streamlit as st
 from transformers import MarianMTModel, MarianTokenizer
 import docx
+from docx.text.paragraph import Paragraph
 import openpyxl
 import fitz  # PyMuPDF
 
@@ -23,7 +24,6 @@ st.set_page_config(page_title="MEP Translator", page_icon="🛠️", layout="wid
 st.title("🛠️ MEP TRANSLATOR (Offline)")
 st.caption("Dịch tài liệu kỹ thuật MEP — DOCX, PDF, Excel, TXT — chạy offline bằng Hugging Face, có chế độ song ngữ.")
 
-
 # ----------------------------------------------------------------------------
 # Hàm dịch offline Hugging Face
 # ----------------------------------------------------------------------------
@@ -34,7 +34,7 @@ def translate_offline(text: str, src: str, tgt: str) -> str:
     model = MarianMTModel.from_pretrained(model_name)
     inputs = tokenizer(text, return_tensors="pt", padding=True)
     translated = model.generate(**inputs)
-    return tokenizer.decode(translated[0], skip_special_tokens=True)
+    return tokenizer.decode(translated[0], skip_special_tokens=True) 
     
 # ----------------------------------------------------------------------------
 # WORD (.docx) — dịch tại chỗ, giữ nguyên style/heading/bảng/bullet
@@ -46,14 +46,13 @@ def translate_docx(file_bytes, src, tgt, bilingual=True):
         if p.text.strip():
             translated = translate_offline(p.text, src, tgt)
             if bilingual:
-                new_p = p.insert_paragraph_after(translated)
+                new_p = insert_paragraph_after(p, translated)
                 new_p.style = p.style
             else:
                 p.text = translated
     out = io.BytesIO()
     d.save(out)
     return out.getvalue()
-
 
 # ----------------------------------------------------------------------------
 # EXCEL (.xlsx) — dịch tại chỗ, giữ nguyên sheet/style/merge/formula
@@ -82,11 +81,9 @@ def translate_xlsx(file_bytes, src, tgt, bilingual=True):
     wb.save(out)
     return out.getvalue()
 
-# ----------------------------------------------------------------------------
-# PDF (kể cả PDF lớn) — trích xuất theo block/trang, xuất ra DOCX giữ đúng
-# thứ tự đọc + ngắt trang gốc (không ghi đè trực tiếp lên PDF để tránh lỗi
-# hiển thị dấu tiếng Việt / chữ Hán / chữ Nhật do thiếu font nhúng sẵn).
-# ----------------------------------------------------------------------------
+# -------------------------------
+# PDF -> DOCX
+# -------------------------------
 
 def translate_pdf(file_bytes, src, tgt, bilingual=True):
     doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -106,7 +103,6 @@ def translate_pdf(file_bytes, src, tgt, bilingual=True):
     out = io.BytesIO()
     out_doc.save(out)
     return out.getvalue()
-
 
 # ----------------------------------------------------------------------------
 # Giao diện Streamlit
