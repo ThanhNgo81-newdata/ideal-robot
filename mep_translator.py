@@ -24,17 +24,23 @@ st.set_page_config(page_title="MEP Translator", page_icon="🛠️", layout="wid
 st.title("🛠️ MEP TRANSLATOR (Offline)")
 st.caption("Dịch tài liệu kỹ thuật MEP — DOCX, PDF, Excel, TXT — chạy offline bằng Hugging Face, có chế độ song ngữ.")
 
-# ----------------------------------------------------------------------------
-# Hàm dịch offline Hugging Face
-# ----------------------------------------------------------------------------
-   
-def translate_offline(text: str, src: str, tgt: str) -> str:
+# -------------------------------
+# Cache model + tokenizer
+# -------------------------------
+@st.cache_resource
+def load_model(src: str, tgt: str):
+    """Load và cache model dịch Hugging Face."""
     model_name = f"Helsinki-NLP/opus-mt-{src}-{tgt}"
     tokenizer = MarianTokenizer.from_pretrained(model_name)
     model = MarianMTModel.from_pretrained(model_name)
+    return tokenizer, model
+
+def translate_offline(text: str, src: str, tgt: str) -> str:
+    """Dịch văn bản bằng model đã cache."""
+    tokenizer, model = load_model(src, tgt)
     inputs = tokenizer(text, return_tensors="pt", padding=True)
     translated = model.generate(**inputs)
-    return tokenizer.decode(translated[0], skip_special_tokens=True) 
+    return tokenizer.decode(translated[0], skip_special_tokens=True)
     
 # -------------------------------
 # Hàm chèn đoạn văn sau một Paragraph
