@@ -40,9 +40,11 @@ def translate_offline(text: str, src: str, tgt: str) -> str:
 # Hàm chèn đoạn văn sau một Paragraph
 # -------------------------------
 
-def insert_paragraph_after(paragraph: Paragraph, text: str):
+def insert_paragraph_after(paragraph, text: str):
     """Chèn một đoạn mới ngay sau paragraph hiện tại."""
-    new_p = paragraph._element.addnext(paragraph._element.__class__())
+    parent = paragraph._element.getparent()
+    new_p = docx.oxml.shared.OxmlElement("w:p")
+    parent.insert(parent.index(paragraph._element) + 1, new_p)
     new_para = Paragraph(new_p, paragraph._parent)
     new_para.add_run(text)
     return new_para
