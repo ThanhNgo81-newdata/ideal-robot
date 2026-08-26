@@ -36,9 +36,20 @@ def translate_offline(text: str, src: str, tgt: str) -> str:
     translated = model.generate(**inputs)
     return tokenizer.decode(translated[0], skip_special_tokens=True) 
     
-# ----------------------------------------------------------------------------
-# WORD (.docx) — dịch tại chỗ, giữ nguyên style/heading/bảng/bullet
-# ----------------------------------------------------------------------------
+# -------------------------------
+# Hàm chèn đoạn văn sau một Paragraph
+# -------------------------------
+
+def insert_paragraph_after(paragraph: Paragraph, text: str):
+    """Chèn một đoạn mới ngay sau paragraph hiện tại."""
+    new_p = paragraph._element.addnext(paragraph._element.__class__())
+    new_para = Paragraph(new_p, paragraph._parent)
+    new_para.add_run(text)
+    return new_para
+
+# -------------------------------
+# DOCX
+# -------------------------------
 
 def translate_docx(file_bytes, src, tgt, bilingual=True):
     d = docx.Document(io.BytesIO(file_bytes))
@@ -53,7 +64,7 @@ def translate_docx(file_bytes, src, tgt, bilingual=True):
     out = io.BytesIO()
     d.save(out)
     return out.getvalue()
-
+    
 # ----------------------------------------------------------------------------
 # EXCEL (.xlsx) — dịch tại chỗ, giữ nguyên sheet/style/merge/formula
 # ----------------------------------------------------------------------------
