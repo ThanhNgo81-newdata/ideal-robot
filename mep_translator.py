@@ -12,7 +12,6 @@ import base64
 import copy
 
 import streamlit as st
-import anthropic
 import pymupdf as fitz
 import docx
 from docx.text.paragraph import Paragraph
@@ -23,12 +22,6 @@ from openpyxl.cell.cell import MergedCell
 # ----------------------------------------------------------------------------
 # Cấu hình chung
 # ----------------------------------------------------------------------------
-
-MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 1500
-CHUNK_CHARS = 3000
-SEP = "\n@@@BLOCK@@@\n"           # dấu phân cách khi dịch nhiều đoạn trong 1 lần gọi
-PDF_PAGE_WARN_THRESHOLD = 25      # PDF trên ngưỡng này sẽ gợi ý chọn khoảng trang
 
 LANGUAGES_VI = {
     "en": "Tiếng Anh", "vi": "Tiếng Việt", "zh": "Tiếng Trung", "ja": "Tiếng Nhật",
@@ -55,15 +48,13 @@ GLOSSARY_HINT = (
 )
 
 st.set_page_config(page_title="MEP Translator", page_icon="🛠️", layout="wide")
+st.title("🛠️ MEP TRANSLATOR (Offline)")
+st.caption("Dịch tài liệu kỹ thuật MEP — DOCX, PDF, Excel, Text — chạy offline bằng Hugging Face.")
 
 
 # ----------------------------------------------------------------------------
 # Dịch thuật (Anthropic API)
 # ----------------------------------------------------------------------------
-
-def get_client(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key)
-
 
 def build_system_prompt(src_label: str, tgt_label: str) -> str:
     return (
@@ -80,89 +71,15 @@ def build_system_prompt(src_label: str, tgt_label: str) -> str:
         "- CHI xuat ra noi dung da dich. Khong them ghi chu, loi giai thich, khong "
         "lap lai van ban goc, khong dung markdown code fence."
     )
-
-
-def translate_text(client, system_prompt: str, text: str) -> str:
-    msg = client.messages.create(
-        model=MODEL, max_tokens=MAX_TOKENS, system=system_prompt,
-        messages=[{"role": "user", "content":
-            "Dich doan van ban ky thuat MEP sau (mot phan trong tai lieu lon hon, "
-            "khong them tieu de hay binh luan):\n\n" + text}],
-    )
-    return "".join(b.text for b in msg.content if b.type == "text").strip()
-
-
-def translate_blocks_batch(client, system_prompt: str, blocks: list) -> list:
-    """Dịch nhiều đoạn văn bản trong 1 lần gọi API, dùng dấu phân cách riêng.
-    Nếu số lượng đoạn trả về không khớp, sẽ dịch lại từng đoạn lẻ để đảm bảo an toàn."""
-    if not blocks:
-        return []
-    joined = SEP.join(blocks)
-    prompt = (
-        system_prompt
-        + f"\n\nDich tung doan van ban duoi day. CAC DOAN duoc ngan cach boi dong "
-          f"'{SEP.strip()}' — hay GIU NGUYEN dung dau phan cach nay giua cac ban dich, "
-          f"tra ve dung so luong doan ({len(blocks)} doan), dung thu tu, khong them "
-          "giai thich:\n\n" + joined
-    )
-    msg = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS * 2,
-                                  messages=[{"role": "user", "content": prompt}])
-    raw = "".join(b.text for b in msg.content if b.type == "text").strip()
-    parts = [p.strip() for p in raw.split(SEP.strip())]
-    if len(parts) == len(blocks):
-        return parts
-    return [translate_text(client, system_prompt, b) for b in blocks]
-
-
-def translate_batch_strings(client, system_prompt: str, items: list) -> list:
-    """Dịch mảng chuỗi ngắn (dùng cho ô Excel) qua JSON."""
-    if not items:
-        return []
-    prompt = (
-        system_prompt
-        + "\n\nDich tung chuoi trong mang JSON sau (noi dung o bang tinh ky thuat "
-          "MEP). CHI tra ve DUY NHAT mot mang JSON hop le chua ban dich, cung so "
-          "phan tu va dung thu tu, khong giai thich, khong dung code fence:\n\n"
-          + json.dumps(items, ensure_ascii=False)
-    )
-    msg = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
-                                  messages=[{"role": "user", "content": prompt}])
-    raw = "".join(b.text for b in msg.content if b.type == "text").strip().strip("`")
-    if raw.lower().startswith("json"):
-        raw = raw[4:].strip()
-    try:
-        arr = json.loads(raw)
-        if isinstance(arr, list) and len(arr) == len(items):
-            return [str(x) for x in arr]
-    except Exception:
-        pass
-    return items
-
-
-def translate_image(client, system_prompt: str, tgt_label: str, image_bytes: bytes,
-                     media_type: str, bilingual: bool) -> str:
-    instr = (
-        f"Day la anh chup tai lieu/ban ve/man hinh ky thuat MEP. Nhan dien toan bo "
-        f"van ban trong anh va dich sang {tgt_label}. Giu dung bo cuc bang bieu neu "
-        "co (dung dau | de phan cach cot)."
-    )
-    if bilingual:
-        instr += (
-            " Trinh bay SONG NGU: voi moi dong/khoi noi dung, hien dong goc truoc, "
-            "ngay ben duoi la dong da dich trong ngoac [ ]."
-        )
-    instr += " Chi xuat noi dung da xu ly, khong giai thich them."
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    msg = client.messages.create(
-        model=MODEL, max_tokens=MAX_TOKENS, system=system_prompt,
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-            {"type": "text", "text": instr},
-        ]}],
-    )
-    return "".join(b.text for b in msg.content if b.type == "text").strip()
-
-
+    
+def translate_offline(text: str, src: str, tgt: str) -> str:
+    model_name = f"Helsinki-NLP/opus-mt-{src}-{tgt}"
+    tokenizer = MarianTokenizer.from_pretrained(model_name)
+    model = MarianMTModel.from_pretrained(model_name)
+    inputs = tokenizer(text, return_tensors="pt", padding=True)
+    translated = model.generate(**inputs)
+    return tokenizer.decode(translated[0], skip_special_tokens=True)
+    
 # ----------------------------------------------------------------------------
 # WORD (.docx) — dịch tại chỗ, giữ nguyên style/heading/bảng/bullet
 # ----------------------------------------------------------------------------
@@ -417,174 +334,30 @@ def translate_pdf_to_docx(client, system_prompt: str, file_bytes: bytes,
 # Giao diện Streamlit
 # ----------------------------------------------------------------------------
 
-st.markdown(
-    """
-    <style>
-    .stApp { background-color: #06192b; }
-    .block-container { padding-top: 2rem; }
-    h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; color: #eaf2f5; }
-    .stMarkdown, p, label, .stCaption { color: #eaf2f5; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.title("🛠️ MEP TRANSLATOR")
-st.caption("Dịch tài liệu kỹ thuật MEP (Cơ – Điện – Nước) — PDF lớn, Word, Excel, Ảnh/ảnh chụp màn hình — đa ngôn ngữ, giữ nguyên cấu trúc file gốc.")
-
-
-def get_secret(key: str) -> str:
-    """Đọc giá trị từ .streamlit/secrets.toml nếu có; trả về '' nếu không có file/khóa đó."""
-    try:
-        return st.secrets.get(key, "")
-    except Exception:
-        return ""
-
-
-# ---- Cổng mật khẩu tùy chọn — chỉ bật khi APP_PASSWORD được cấu hình trong secrets.toml ----
-_app_password = get_secret("APP_PASSWORD")
-if _app_password:
-    if "authed" not in st.session_state:
-        st.session_state.authed = False
-    if not st.session_state.authed:
-        pwd = st.text_input("Nhập mật khẩu truy cập", type="password")
-        if pwd == _app_password:
-            st.session_state.authed = True
-            st.rerun()
-        elif pwd:
-            st.error("Sai mật khẩu.")
-        st.stop()
-
 with st.sidebar:
-    st.header("Cấu hình")
-    _secret_key = get_secret("ANTHROPIC_API_KEY")
-    if _secret_key:
-        api_key = _secret_key
-        st.success("🔑 API key đã được cấu hình sẵn.")
-    else:
-        api_key = st.text_input("Anthropic API key", type="password",
-                                 help="Dạng sk-ant-... — lấy tại console.anthropic.com")
-    st.markdown("---")
+    st.header("Cấu hình dịch")
+    src_lang = st.selectbox("Ngôn ngữ nguồn", list(LANGUAGES_VI.keys()), format_func=lambda x: LANGUAGES_VI[x])
+    tgt_lang = st.selectbox("Ngôn ngữ đích", list(LANGUAGES_VI.keys()), format_func=lambda x: LANGUAGES_VI[x])
 
-    lang_keys = list(LANGUAGES_VI.keys())
-    src_options = ["auto"] + lang_keys + ["other"]
-    tgt_options = lang_keys + ["other"]
+uploaded = st.file_uploader("Tải lên tệp cần dịch (PDF, DOCX, XLSX, TXT)", type=["pdf","docx","xlsx","txt"])
 
-    src = st.selectbox("Ngôn ngữ nguồn", src_options,
-                        format_func=lambda k: "Tự động nhận diện" if k == "auto"
-                        else ("Khác (tự nhập)" if k == "other" else LANGUAGES_VI[k]))
-    src_custom = st.text_input("→ Nhập tên ngôn ngữ nguồn (tiếng Anh)", disabled=(src != "other"))
-
-    tgt = st.selectbox("Ngôn ngữ đích", tgt_options,
-                        format_func=lambda k: "Khác (tự nhập)" if k == "other" else LANGUAGES_VI[k])
-    tgt_custom = st.text_input("→ Nhập tên ngôn ngữ đích (tiếng Anh)", disabled=(tgt != "other"))
-
-    st.markdown("---")
-    bilingual = st.checkbox("🈯 Dịch song ngữ (giữ cả bản gốc + bản dịch)", value=False)
-    st.markdown("---")
-    st.caption("Chuyên ngành: tối ưu cho kỹ sư MEP — giữ nguyên mã thiết bị, tiêu chuẩn "
-               "(TCVN/QCVN/ASHRAE/NFPA) và đơn vị kỹ thuật.")
-
-
-def resolve_lang_label(code, custom_text, table):
-    if code == "other":
-        return custom_text.strip() if custom_text.strip() else "the target language"
-    return table[code]
-
-
-uploaded = st.file_uploader(
-    "Tải lên tệp cần dịch (PDF, DOCX, XLSX/XLS, JPG, PNG — kể cả ảnh chụp màn hình)",
-    type=["pdf", "docx", "xlsx", "xls", "jpg", "jpeg", "png", "webp"],
-)
-
-if "result" not in st.session_state:
-    st.session_state.result = None
-
-page_from, page_to = None, None
-
-if uploaded is not None:
-    kind = uploaded.name.lower().rsplit(".", 1)[-1]
-    kind = "xlsx" if kind in ("xlsx", "xls") else ("image" if kind in ("jpg", "jpeg", "png", "webp") else kind)
+if uploaded:
+    kind = uploaded.name.lower().split(".")[-1]
     file_bytes = uploaded.getvalue()
 
-    st.write(f"**Tệp:** {uploaded.name} · **Loại:** {kind.upper()} · **Kích thước:** {len(file_bytes)/1024:.0f} KB")
+    if st.button("🌐 Dịch tài liệu"):
+        if kind == "docx":
+            out_bytes = translate_docx(file_bytes, src_lang, tgt_lang)
+            st.download_button("⬇️ Tải DOCX đã dịch", out_bytes, file_name="translated.docx")
+        elif kind == "xlsx":
+            out_bytes = translate_xlsx(file_bytes, src_lang, tgt_lang)
+            st.download_button("⬇️ Tải Excel đã dịch", out_bytes, file_name="translated.xlsx")
+        elif kind == "pdf":
+            out_bytes = translate_pdf(file_bytes, src_lang, tgt_lang)
+            st.download_button("⬇️ Tải DOCX từ PDF đã dịch", out_bytes, file_name="translated_from_pdf.docx")
+        elif kind == "txt":
+            text = file_bytes.decode("utf-8")
+            translated = translate_offline(text, src_lang, tgt_lang)
+            st.text_area("Bản dịch", translated, height=400)
+            st.download_button("⬇️ Tải TXT đã dịch", translated, file_name="translated.txt")
 
-    if kind == "pdf":
-        try:
-            n_pages = get_pdf_page_count(file_bytes)
-            st.write(f"**Số trang:** {n_pages}")
-            if n_pages > PDF_PAGE_WARN_THRESHOLD:
-                st.warning(f"PDF có {n_pages} trang — dịch toàn bộ có thể mất khá lâu và tốn "
-                           "nhiều lượt gọi API. Bạn có thể chọn khoảng trang cần dịch bên dưới.")
-            c1, c2 = st.columns(2)
-            page_from = c1.number_input("Từ trang", min_value=1, max_value=n_pages, value=1)
-            page_to = c2.number_input("Đến trang", min_value=1, max_value=n_pages, value=n_pages)
-        except Exception as e:
-            st.error(f"Không đọc được PDF: {e}")
-
-    if st.button("🌐 Dịch tài liệu", type="primary", disabled=not api_key):
-        if not api_key:
-            st.error("Vui lòng nhập Anthropic API key ở thanh bên trái.")
-        else:
-            try:
-                client = get_client(api_key)
-                src_label = ("ngon ngu nguon (tu dong nhan dien)" if src == "auto"
-                              else resolve_lang_label(src, src_custom, LANGUAGES_EN))
-                tgt_label = resolve_lang_label(tgt, tgt_custom, LANGUAGES_EN)
-                system_prompt = build_system_prompt(src_label, tgt_label)
-
-                progress = st.progress(0, text="Đang xử lý...")
-
-                def cb(pct):
-                    progress.progress(min(100, pct), text=f"Đang dịch... {pct}%")
-
-                if kind == "pdf":
-                    original, translated, out_bytes = translate_pdf_to_docx(
-                        client, system_prompt, file_bytes, int(page_from), int(page_to), bilingual, cb)
-                    st.session_state.result = {"kind": "pdf", "original": original, "translated": translated,
-                                                "docx_bytes": out_bytes, "name": uploaded.name}
-
-                elif kind == "docx":
-                    original, translated, out_bytes = translate_docx(
-                        client, system_prompt, file_bytes, bilingual, cb)
-                    st.session_state.result = {"kind": "docx", "original": original, "translated": translated,
-                                                "docx_bytes": out_bytes, "name": uploaded.name}
-
-                elif kind == "xlsx":
-                    original, translated, out_bytes = translate_xlsx(
-                        client, system_prompt, file_bytes, bilingual, cb)
-                    st.session_state.result = {"kind": "xlsx", "original": original, "translated": translated,
-                                                "xlsx_bytes": out_bytes, "name": uploaded.name}
-
-                elif kind == "image":
-                    media_type = uploaded.type or "image/png"
-                    translated = translate_image(client, system_prompt, tgt_label, file_bytes, media_type, bilingual)
-                    cb(100)
-                    st.session_state.result = {"kind": "image", "original": "(nội dung ảnh — xem tab Bản dịch)",
-                                                "translated": translated, "name": uploaded.name}
-
-                progress.progress(100, text="Hoàn tất")
-                st.success("Đã dịch xong.")
-            except Exception as e:
-                st.error(f"Lỗi khi dịch: {e}")
-
-if st.session_state.result:
-    res = st.session_state.result
-    tab1, tab2 = st.tabs(["📄 Văn bản gốc", "🌐 Bản dịch"])
-    with tab1:
-        st.text_area("Gốc", res["original"], height=420, label_visibility="collapsed")
-    with tab2:
-        st.text_area("Dịch", res["translated"], height=420, label_visibility="collapsed")
-
-        base_name = res["name"].rsplit(".", 1)[0]
-        st.download_button("⬇️ Tải bản dịch (.txt)", res["translated"], file_name=f"{base_name}_translated.txt")
-
-        if res["kind"] in ("docx", "pdf") and "docx_bytes" in res:
-            label = "⬇️ Tải Word đã dịch (.docx)" if res["kind"] == "docx" else "⬇️ Tải Word tái dựng từ PDF (.docx)"
-            st.download_button(label, res["docx_bytes"], file_name=f"{base_name}_translated.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-        if res["kind"] == "xlsx" and "xlsx_bytes" in res:
-            st.download_button("⬇️ Tải bảng tính đã dịch (.xlsx)", res["xlsx_bytes"],
-                                file_name=f"{base_name}_translated.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
